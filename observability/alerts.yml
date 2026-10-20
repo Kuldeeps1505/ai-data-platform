@@ -1,0 +1,23 @@
+groups:
+  - name: ai-data-platform
+    rules:
+      - alert: ConsumerLagHigh
+        expr: sum(ai_data_consumer_lag) > 1000
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Kafka consumer lag exceeds 1,000 messages"}
+      - alert: ProcessingFailureDetected
+        expr: increase(ai_data_processing_failures_total[5m]) > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations: {summary: "A platform processing failure occurred"}
+      - alert: DatasetQualityFailed
+        expr: ai_data_dataset_quality_status == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations: {summary: "Latest dataset failed a quality gate"}
+      - alert: DatasetStale
+        expr: ai_data_dataset_freshness_seconds > 300
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Latest published dataset is older than five minutes"}

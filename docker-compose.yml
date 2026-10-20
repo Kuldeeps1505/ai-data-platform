@@ -1,0 +1,293 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ai_data_platform
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: platform
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platform -d ai_data_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://platform:platform@postgres:5432/ai_data_platform
+      RAW_STORAGE_PATH: /data/raw
+      CURATED_STORAGE_PATH: /data/curated
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      API_KEY: ${API_KEY:-local-development-key}
+      EVALUATION_STORAGE_PATH: /data/evaluations
+      OBJECT_STORE_ENDPOINT: http://localstack:4566
+      OBJECT_STORE_ACCESS_KEY: test
+      OBJECT_STORE_SECRET_KEY: test
+      OBJECT_STORE_BUCKET: ai-data-platform
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_DATABASE: ai_data_platform
+      CLICKHOUSE_USERNAME: platform
+      CLICKHOUSE_PASSWORD: platform
+      QDRANT_URL: http://qdrant:6333
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://localhost:8000/health')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - platform-data:/data
+
+  kafka:
+    image: apache/kafka:3.9.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+  localstack:
+    image: localstack/localstack:3.8.1
+    profiles: ["sources"]
+    environment:
+      SERVICES: s3
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    ports:
+      - "4566:4566"
+    volumes:
+      - localstack-data:/var/lib/localstack
+
+  cdc-postgres:
+    image: debezium/postgres:16-alpine
+    profiles: ["sources"]
+    command: postgres -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10
+    environment:
+      POSTGRES_DB: source_app
+      POSTGRES_USER: cdc_user
+      POSTGRES_PASSWORD: cdc_password
+    volumes:
+      - cdc-postgres-data:/var/lib/postgresql/data
+      - ./cdc/init-source.sql:/docker-entrypoint-initdb.d/init-source.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cdc_user -d source_app"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  debezium-connect:
+    image: quay.io/debezium/connect:3.6
+    profiles: ["sources"]
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: ai-data-platform-cdc
+      CONFIG_STORAGE_TOPIC: cdc_connect_configs
+      OFFSET_STORAGE_TOPIC: cdc_connect_offsets
+      STATUS_STORAGE_TOPIC: cdc_connect_status
+    ports:
+      - "8083:8083"
+    depends_on:
+      kafka:
+        condition: service_started
+      cdc-postgres:
+        condition: service_healthy
+
+  cdc-setup:
+    image: curlimages/curl:8.12.1
+    profiles: ["sources"]
+    depends_on:
+      debezium-connect:
+        condition: service_started
+    volumes:
+      - ./cdc/source-connector.json:/config/source-connector.json:ro
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        until curl -sf http://debezium-connect:8083/connectors; do sleep 2; done
+        curl -sS -X PUT -H 'Content-Type: application/json' \
+          --data @/config/source-connector.json \
+          http://debezium-connect:8083/connectors/source-app-postgres/config
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.12
+    profiles: ["advanced"]
+    environment:
+      CLICKHOUSE_DB: ai_data_platform
+      CLICKHOUSE_USER: platform
+      CLICKHOUSE_PASSWORD: platform
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "8123:8123"
+      - "9009:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.4
+    profiles: ["advanced"]
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+
+  flink-jobmanager:
+    build: ./jobs/flink
+    image: ai-data-platform-flink:local
+    profiles: ["advanced"]
+    command: jobmanager
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./jobs/flink:/opt/flink/jobs:ro
+    depends_on:
+      kafka:
+        condition: service_started
+      clickhouse:
+        condition: service_started
+
+  flink-taskmanager:
+    image: ai-data-platform-flink:local
+    profiles: ["advanced"]
+    command: taskmanager
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+      - TASK_MANAGER_NUMBER_OF_TASK_SLOTS=2
+    depends_on:
+      flink-jobmanager:
+        condition: service_started
+
+  flink-submit:
+    image: ai-data-platform-flink:local
+    profiles: ["advanced"]
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - until /opt/flink/bin/flink list -m flink-jobmanager:8081; do sleep 3; done; /opt/flink/bin/flink run -d -m flink-jobmanager:8081 /opt/flink/usrlib/agent-metrics-flink-job.jar
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      CLICKHOUSE_JDBC_URL: jdbc:ch:http://clickhouse:8123/ai_data_platform?user=platform&password=platform
+    depends_on:
+      flink-jobmanager:
+        condition: service_started
+      flink-taskmanager:
+        condition: service_started
+      kafka:
+        condition: service_started
+      clickhouse:
+        condition: service_started
+
+  spark-master:
+    image: apache/spark:3.5.9
+    profiles: ["advanced"]
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - ./jobs/spark:/opt/spark/jobs:ro
+      - platform-data:/data
+
+  spark-worker:
+    image: apache/spark:3.5.9
+    profiles: ["advanced"]
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    depends_on:
+      - spark-master
+    volumes:
+      - platform-data:/data
+
+  consumer:
+    build: .
+    command: python -m app.consumer
+    environment:
+      DATABASE_URL: postgresql+psycopg://platform:platform@postgres:5432/ai_data_platform
+      RAW_STORAGE_PATH: /data/raw
+      CURATED_STORAGE_PATH: /data/curated
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_SERVICE_NAME: ai-data-platform-consumer
+      API_KEY: ${API_KEY:-local-development-key}
+    depends_on:
+      api:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    volumes:
+      - platform-data:/data
+    expose:
+      - "8001"
+
+  dispatcher:
+    build: .
+    command: python -m app.dispatcher
+    environment:
+      DATABASE_URL: postgresql+psycopg://platform:platform@postgres:5432/ai_data_platform
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      api:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./observability/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+
+volumes:
+  postgres-data:
+  platform-data:
+  prometheus-data:
+  grafana-data:
+  localstack-data:
+  cdc-postgres-data:
+  clickhouse-data:
+  qdrant-data:

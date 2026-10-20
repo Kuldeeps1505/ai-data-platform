@@ -1,0 +1,13 @@
+{
+  "title": "AI Data Platform - Operations",
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    {"type":"timeseries","title":"Accepted events / second","targets":[{"expr":"sum(rate(ai_data_events_ingested_total[5m]))","refId":"A"}],"gridPos":{"x":0,"y":0,"w":12,"h":8}},
+    {"type":"timeseries","title":"Rejected events / second","targets":[{"expr":"sum(rate(ai_data_events_rejected_total[5m]))","refId":"A"}],"gridPos":{"x":12,"y":0,"w":12,"h":8}},
+    {"type":"timeseries","title":"Consumer lag","targets":[{"expr":"sum(ai_data_consumer_lag) by (topic)","refId":"A"}],"gridPos":{"x":0,"y":8,"w":12,"h":8}},
+    {"type":"timeseries","title":"Processing failures / second","targets":[{"expr":"sum(rate(ai_data_processing_failures_total[5m]))","refId":"A"}],"gridPos":{"x":12,"y":8,"w":12,"h":8}},
+    {"type":"stat","title":"Published dataset quality","targets":[{"expr":"max(ai_data_dataset_quality_status)","refId":"A"}],"gridPos":{"x":0,"y":16,"w":8,"h":5}},
+    {"type":"stat","title":"Dataset freshness seconds","targets":[{"expr":"max(ai_data_dataset_freshness_seconds)","refId":"A"}],"gridPos":{"x":8,"y":16,"w":8,"h":5}}
+  ]
+}

@@ -1,0 +1,8 @@
+aws_region = "ap-south-1"
+project_name = "ai-data-platform"
+environment = "test"
+container_image = "ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/ai-data-platform:TAG"
+vpc_id = "vpc-REPLACE"
+private_subnet_ids = ["subnet-REPLACE-A", "subnet-REPLACE-B"]
+security_group_ids = ["sg-REPLACE"]
+# Set api_key through TF_VAR_api_key, never commit it here.

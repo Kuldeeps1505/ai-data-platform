@@ -1,0 +1,16 @@
+{
+  "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+  "plugin.name": "pgoutput",
+  "database.hostname": "cdc-postgres",
+  "database.port": "5432",
+  "database.user": "cdc_user",
+  "database.password": "cdc_password",
+  "database.dbname": "source_app",
+  "topic.prefix": "source_app",
+  "table.include.list": "public.customer_context",
+  "slot.name": "ai_data_platform_cdc",
+  "publication.name": "ai_data_platform_publication",
+  "publication.autocreate.mode": "disabled",
+  "snapshot.mode": "initial",
+  "tombstones.on.delete": "false"
+}
